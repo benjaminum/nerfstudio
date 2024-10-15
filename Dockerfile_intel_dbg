@@ -1,0 +1,160 @@
+# syntax=docker/dockerfile:1
+ARG NERFSTUDIO_VERSION=""
+ARG IPEX_VER=2.3.110-xpu
+
+# Pull source either provided or from git.
+FROM scratch as source_copy
+ONBUILD COPY . /tmp/nerfstudio
+
+FROM intel/intel-extension-for-pytorch:${IPEX_VER} as builder
+# FROM nvidia/cuda:${NVIDIA_CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} as builder
+ARG IPEX_VER
+ARG ONEAPI_VER=2024.1
+
+ENV IPEX_VER=$IPEX_VER
+ENV ONEAPI_VER=$ONEAPI_VER
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV QT_XCB_GL_INTEGRATION=xcb_egl
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends --no-install-suggests \
+        git \
+        cmake \
+        ninja-build \
+        build-essential \
+        libboost-program-options-dev \
+        libboost-filesystem-dev \
+        libboost-graph-dev \
+        libboost-system-dev \
+        libeigen3-dev \
+        libflann-dev \
+        libfreeimage-dev \
+        libmetis-dev \
+        libgoogle-glog-dev \
+        libgtest-dev \
+        libsqlite3-dev \
+        libglew-dev \
+        qtbase5-dev \
+        libqt5opengl5-dev \
+        libcgal-dev \
+        libceres-dev \
+        python3.10-dev \
+        python3-pip \
+        vim
+
+# Build and install COLMAP.
+RUN git clone https://github.com/colmap/colmap.git && \
+    cd colmap && \
+    git checkout "3.9.1" && \
+    mkdir build && \
+    cd build && \
+    mkdir -p /build && \
+    cmake .. -GNinja \
+        -DCMAKE_INSTALL_PREFIX=/build/colmap && \
+    ninja install -j$(nproc) && \
+    cd ~
+
+# install oneAPI basekit for IPEX and Eigen in Ceres Solver
+# Only these should be sufficient (fromIPEX cppsdk install instructions):
+# sudo apt install -y intel-oneapi-dpcpp-cpp-2024.1=2024.1.0-963 intel-oneapi-mkl-devel=2024.1.0-691 intel-oneapi-ccl-devel=2021.12.0-309
+RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB \
+| gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null \
+# add signed entry to apt sources and configure the APT client to use Intel repository:
+&& echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | sudo tee /etc/apt/sources.list.d/oneAPI.list \
+&& DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get update \
+&& apt-get install -y --no-install-recommends intel-basekit-${ONEAPI_VER} \
+&& echo "source /opt/intel/oneapi/setvars.sh" >> /root/.bashrc \
+&& rm -fr /var/lib/apt/lists/*
+
+# Upgrade pip and install dependencies.
+# pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu118 && \
+# pip install --no-cache-dir torch==2.1.0.post2 torchvision==0.16.0.post2 'numpy<2.0.0' --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ && \
+RUN pip install --no-cache-dir --upgrade pip 'setuptools<70.0.0' && \
+    python -m pip install 'numpy<2.0.0' torch==2.1.0.post2 torchvision==0.16.0.post2 torchaudio==2.1.0.post2 intel-extension-for-pytorch==2.1.30+xpu oneccl_bind_pt==2.1.300+xpu --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ && \
+    git clone --branch master --recursive https://github.com/cvg/Hierarchical-Localization.git /opt/hloc && \
+    cd /opt/hloc && git checkout v1.4 && python3.10 -m pip install --no-cache-dir . && \
+    pip install --no-cache-dir pycolmap==0.6.1 pyceres==2.1 omegaconf==2.3.0 cmake==3.27.0
+
+# Patch a problem in torch 2.3 which does not define torch::xpurt
+# RUN sed -i -e 's/;\?torch::xpurt;\?//' /usr/local/lib/python3.10/dist-packages/torch/share/cmake/Caffe2/Caffe2Targets.cmake
+
+RUN cd ~ && git clone -b nerfacc5 https://github.com/benjaminum/tiny-dpcpp-nn.git \
+    && cd tiny-dpcpp-nn/extern/ \
+    && git clone --recurse-submodules https://github.com/pybind/pybind11.git \
+    && cd ../dpcpp_bindings  \
+    && source /opt/intel/oneapi/setvars.sh \
+    && TBB_DIR=/opt/intel/oneapi/tbb/2021.12/lib/cmake/tbb CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) pip install --upgrade --no-cache-dir -e .
+
+# nerfacc
+# nerfacc is not public yet
+# so git clone in build_container.sh and copy and install during building
+# # RUN pip install --upgrade --no-cache-dir git+https://github.com/intel-sandbox/nerfacc.git@445dfda3125efa21383cb6b4359ef72cffcff3d2
+# RUN git clone https://github.com/intel-sandbox/nerfacc.git \
+COPY build/nerfacc nerfacc 
+RUN pushd nerfacc \
+    && source /opt/intel/oneapi/setvars.sh \
+    && CMAKE_BUILD_PARALLEL_LEVEL=$(nproc) pip install --upgrade --no-cache-dir .
+
+# # Install gsplat and nerfstudio.
+# # NOTE: both are installed jointly in order to prevent docker cache with latest
+# # gsplat version (we do not expliticly specify the commit hash).
+# #
+# # We set MAX_JOBS to reduce resource usage for GH actions:
+# # - https://github.com/nerfstudio-project/gsplat/blob/db444b904976d6e01e79b736dd89a1070b0ee1d0/setup.py#L13-L23
+# COPY --from=source /tmp/nerfstudio/ /tmp/nerfstudio
+# RUN export TORCH_CUDA_ARCH_LIST="$(echo "$CUDA_ARCHITECTURES" | tr ';' '\n' | awk '$0 > 70 {print substr($0,1,1)"."substr($0,2)}' | tr '\n' ' ' | sed 's/ $//')" && \
+# RUN export MAX_JOBS=4 && \
+    # GSPLAT_VERSION="$(sed -n 's/.*gsplat==\s*\([^," '"'"']*\).*/\1/p' /tmp/nerfstudio/pyproject.toml)" && \
+    # pip install --no-cache-dir git+https://github.com/nerfstudio-project/gsplat.git@v${GSPLAT_VERSION} && \
+    # pip install --no-cache-dir /tmp/nerfstudio 'numpy<2.0.0' && \
+    # rm -rf /tmp/nerfstudio
+
+# # Fix permissions
+# RUN chmod -R go=u /usr/local/lib/python3.10 && \
+#     chmod -R go=u /build
+
+# #
+# # Docker runtime stage.
+# #
+# # FROM nvidia/cuda:${NVIDIA_CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} as runtime
+# # ARG UBUNTU_VERSION
+
+# # LABEL org.opencontainers.image.source = "https://github.com/nerfstudio-project/nerfstudio"
+# # LABEL org.opencontainers.image.licenses = "Apache License 2.0"
+# # LABEL org.opencontainers.image.base.name="docker.io/library/nvidia/cuda:${NVIDIA_CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}"
+# # LABEL org.opencontainers.image.documentation = "https://docs.nerf.studio/"
+
+# # # Minimal dependencies to run COLMAP binary compiled in the builder stage.
+# # # Note: this reduces the size of the final image considerably, since all the
+# # # build dependencies are not needed.
+# # RUN apt-get update && \
+# #     apt-get install -y --no-install-recommends --no-install-suggests \
+# #         libboost-filesystem1.74.0 \
+# #         libboost-program-options1.74.0 \
+# #         libc6 \
+# #         libceres2 \
+# #         libfreeimage3 \
+# #         libgcc-s1 \
+# #         libgl1 \
+# #         libglew2.2 \
+# #         libgoogle-glog0v5 \
+# #         libqt5core5a \
+# #         libqt5gui5 \
+# #         libqt5widgets5 \
+# #         python3.10 \
+# #         python3.10-dev \
+# #         build-essential \
+# #         python-is-python3 \
+# #         ffmpeg
+
+# # # Copy packages from builder stage.
+# # COPY --from=builder /nerfacc /nerfacc
+# # COPY --from=builder /build/colmap/ /usr/local/
+# # COPY --from=builder /usr/local/lib/python3.10/dist-packages/ /usr/local/lib/python3.10/dist-packages/
+# # COPY --from=builder /usr/local/bin/ns* /usr/local/bin/
+
+# # # Install nerfstudio cli auto completion
+# # RUN /bin/bash -c 'ns-install-cli --mode install'
+
+# # # Bash as default entrypoint.
+# # CMD /bin/bash -l
