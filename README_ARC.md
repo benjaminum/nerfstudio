@@ -16,7 +16,7 @@ docker build --tag nerfstudio_arc -f Dockerfile_intel .
 
 Run a container with the image using
 ```bash
-docker run --device=/dev/dri/card1:/dev/dri/card1 --device=/dev/dri/renderD128:/dev/dri/renderD128 --rm -it nerfstudio_arc bash
+docker run --device=/dev/dri/card1:/dev/dri/card1 --device=/dev/dri/renderD128:/dev/dri/renderD128 -p 7007:7007 --rm -it nerfstudio_arc bash
 ```
 Note that the container will be removed on exit. Remove `--rm` to keep the container.
 Make sure to map the right GPU devices. In some cases the first card is `/dev/dri/card0`.
@@ -35,3 +35,4 @@ ns-download-data nerfstudio --capture-name=poster
 # Train model
 ns-train nerfacto --data data/nerfstudio/poster
 ```
+You can connect to the web viewer by visiting http://localhost:7007
