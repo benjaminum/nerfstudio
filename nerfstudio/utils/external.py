@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import sys
+import torch
 
 
 class _LazyError:
@@ -38,21 +39,45 @@ class _LazyError:
 TCNN_EXISTS = False
 tcnn_import_exception = None
 tcnn = None
-try:
-    import tinycudann
+if torch.cuda.is_available():
+    try:
+        import tinycudann
 
-    tcnn = tinycudann
-    del tinycudann
-    TCNN_EXISTS = True
-except ModuleNotFoundError as _exp:
-    tcnn_import_exception = _exp
-except ImportError as _exp:
-    tcnn_import_exception = _exp
-except EnvironmentError as _exp:
-    if "Unknown compute capability" not in _exp.args[0]:
-        raise _exp
-    print("Could not load tinycudann: " + str(_exp), file=sys.stderr)
-    tcnn_import_exception = _exp
+        tcnn = tinycudann
+        del tinycudann
+        TCNN_EXISTS = True
+    except ModuleNotFoundError as _exp:
+        tcnn_import_exception = _exp
+    except ImportError as _exp:
+        tcnn_import_exception = _exp
+    except EnvironmentError as _exp:
+        if "Unknown compute capability" not in _exp.args[0]:
+            raise _exp
+        print("Could not load tinycudann: " + str(_exp), file=sys.stderr)
+        tcnn_import_exception = _exp
 
-if tcnn_import_exception is not None:
-    tcnn = _LazyError(tcnn_import_exception)
+    if tcnn_import_exception is not None:
+        tcnn = _LazyError(tcnn_import_exception)
+
+
+
+if torch.xpu.is_available():
+    try:
+        import tiny_dpcpp_nn
+
+        tcnn = tiny_dpcpp_nn
+        del tiny_dpcpp_nn
+        TCNN_EXISTS = True
+    except ModuleNotFoundError as _exp:
+        tcnn_import_exception = _exp
+    except ImportError as _exp:
+        tcnn_import_exception = _exp
+    except EnvironmentError as _exp:
+        if "Unknown compute capability" not in _exp.args[0]:
+            raise _exp
+        print("Could not load tinycudann: " + str(_exp), file=sys.stderr)
+        tcnn_import_exception = _exp
+
+    if tcnn_import_exception is not None:
+        tcnn = _LazyError(tcnn_import_exception)
+

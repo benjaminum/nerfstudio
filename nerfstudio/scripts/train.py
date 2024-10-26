@@ -53,6 +53,10 @@ from typing import Any, Callable, Literal, Optional
 
 import numpy as np
 import torch
+try:
+    import intel_extension_for_pytorch
+except Exception as e:
+    print(e)
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import tyro
@@ -109,7 +113,7 @@ def _distributed_worker(
     dist_url: str,
     config: TrainerConfig,
     timeout: timedelta = DEFAULT_TIMEOUT,
-    device_type: Literal["cpu", "cuda", "mps"] = "cuda",
+    device_type: Literal["cpu", "cuda", "mps", "xpu"] = "xpu",
 ) -> Any:
     """Spawned distributed worker that handles the initialization of process group and handles the
        training process on multiple processes.
@@ -165,7 +169,7 @@ def launch(
     dist_url: str = "auto",
     config: Optional[TrainerConfig] = None,
     timeout: timedelta = DEFAULT_TIMEOUT,
-    device_type: Literal["cpu", "cuda", "mps"] = "cuda",
+    device_type: Literal["cpu", "cuda", "mps", "xpu"] = "xpu",
 ) -> None:
     """Function that spawns multiple processes to call on main_func
 

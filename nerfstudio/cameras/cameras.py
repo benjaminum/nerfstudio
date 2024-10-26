@@ -171,11 +171,11 @@ class Cameras(TensorDataclass):
             name: The name of the variable. Used for error messages
         """
         if isinstance(fc_xy, float):
-            fc_xy = torch.tensor([fc_xy], device=self.device)
+            fc_xy = torch.tensor([fc_xy], device=self.device, dtype=torch.float32)
         elif isinstance(fc_xy, torch.Tensor):
             if fc_xy.ndim == 0 or fc_xy.shape[-1] != 1:
                 fc_xy = fc_xy.unsqueeze(-1)
-            fc_xy = fc_xy.to(self.device)
+            fc_xy = fc_xy.to(torch.float32).to(self.device)
         else:
             raise ValueError(f"{name} must be a float or tensor, got {type(fc_xy)}")
         return fc_xy

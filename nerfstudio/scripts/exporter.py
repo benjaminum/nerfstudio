@@ -30,6 +30,10 @@ from typing import List, Optional, Tuple, Union, cast
 import numpy as np
 import open3d as o3d
 import torch
+try:
+    import intel_extension_for_pytorch
+except Exception as e:
+    print(e)
 import tyro
 from typing_extensions import Annotated, Literal
 
