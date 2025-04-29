@@ -24,6 +24,7 @@ import sys
 import typing
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from importlib.metadata import version
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, cast
 
@@ -39,9 +40,7 @@ from typing_extensions import Annotated, Literal
 
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.data.datamanagers.base_datamanager import VanillaDataManager
-from nerfstudio.data.datamanagers.full_images_datamanager import FullImageDatamanager
 from nerfstudio.data.datamanagers.parallel_datamanager import ParallelDataManager
-from nerfstudio.data.datamanagers.random_cameras_datamanager import RandomCamerasDataManager
 from nerfstudio.data.scene_box import OrientedBox
 from nerfstudio.exporter import texture_utils, tsdf_utils
 from nerfstudio.exporter.exporter_utils import collect_camera_poses, generate_point_cloud, get_mesh_from_filename
@@ -77,8 +76,13 @@ def validate_pipeline(normal_method: str, normal_output_name: str, pipeline: Pip
         directions = torch.ones_like(origins)
         pixel_area = torch.ones_like(origins[..., :1])
         camera_indices = torch.zeros_like(origins[..., :1])
+        metadata = {"directions_norm": torch.linalg.vector_norm(directions, dim=-1, keepdim=True)}
         ray_bundle = RayBundle(
-            origins=origins, directions=directions, pixel_area=pixel_area, camera_indices=camera_indices
+            origins=origins,
+            directions=directions,
+            pixel_area=pixel_area,
+            camera_indices=camera_indices,
+            metadata=metadata,
         )
         outputs = pipeline.model(ray_bundle)
         if normal_output_name not in outputs:
@@ -139,10 +143,11 @@ class ExportPointCloud(Exporter):
         # Increase the batchsize to speed up the evaluation.
         assert isinstance(
             pipeline.datamanager,
-            (VanillaDataManager, ParallelDataManager, FullImageDatamanager, RandomCamerasDataManager),
+            (VanillaDataManager, ParallelDataManager),
         )
-        assert pipeline.datamanager.train_pixel_sampler is not None
-        pipeline.datamanager.train_pixel_sampler.num_rays_per_batch = self.num_rays_per_batch
+        if isinstance(pipeline.datamanager, VanillaDataManager):
+            assert pipeline.datamanager.train_pixel_sampler is not None
+            pipeline.datamanager.train_pixel_sampler.num_rays_per_batch = self.num_rays_per_batch
 
         # Whether the normals should be estimated based on the point cloud.
         estimate_normals = self.normal_method == "open3d"
@@ -217,6 +222,11 @@ class ExportTSDFMesh(Exporter):
     """If using xatlas for unwrapping, the pixels per side of the texture image."""
     target_num_faces: Optional[int] = 50000
     """Target number of faces for the mesh to texture."""
+    refine_mesh_using_initial_aabb_estimate: bool = False
+    """Refine the mesh using the initial AABB estimate."""
+    refinement_epsilon: float = 1e-2
+    """Refinement epsilon for the mesh. This is the distance in meters that the refined AABB/OBB will be expanded by
+    in each direction."""
 
     def main(self) -> None:
         """Export mesh"""
@@ -237,6 +247,8 @@ class ExportTSDFMesh(Exporter):
             use_bounding_box=self.use_bounding_box,
             bounding_box_min=self.bounding_box_min,
             bounding_box_max=self.bounding_box_max,
+            refine_mesh_using_initial_aabb_estimate=self.refine_mesh_using_initial_aabb_estimate,
+            refinement_epsilon=self.refinement_epsilon,
         )
 
         # possibly
@@ -280,12 +292,6 @@ class ExportPoissonMesh(Exporter):
     """Name of the normal output."""
     save_point_cloud: bool = False
     """Whether to save the point cloud."""
-    use_bounding_box: bool = True
-    """Only query points within the bounding box"""
-    bounding_box_min: Tuple[float, float, float] = (-1, -1, -1)
-    """Minimum of the bounding box, used if use_bounding_box is True."""
-    bounding_box_max: Tuple[float, float, float] = (1, 1, 1)
-    """Minimum of the bounding box, used if use_bounding_box is True."""
     obb_center: Optional[Tuple[float, float, float]] = None
     """Center of the oriented bounding box."""
     obb_rotation: Optional[Tuple[float, float, float]] = None
@@ -320,10 +326,11 @@ class ExportPoissonMesh(Exporter):
         # Increase the batchsize to speed up the evaluation.
         assert isinstance(
             pipeline.datamanager,
-            (VanillaDataManager, ParallelDataManager, FullImageDatamanager, RandomCamerasDataManager),
+            (VanillaDataManager, ParallelDataManager),
         )
-        assert pipeline.datamanager.train_pixel_sampler is not None
-        pipeline.datamanager.train_pixel_sampler.num_rays_per_batch = self.num_rays_per_batch
+        if isinstance(pipeline.datamanager, VanillaDataManager):
+            assert pipeline.datamanager.train_pixel_sampler is not None
+            pipeline.datamanager.train_pixel_sampler.num_rays_per_batch = self.num_rays_per_batch
 
         # Whether the normals should be estimated based on the point cloud.
         estimate_normals = self.normal_method == "open3d"
@@ -483,6 +490,8 @@ class ExportGaussianSplat(Exporter):
     Export 3D Gaussian Splatting model to a .ply
     """
 
+    output_filename: str = "splat.ply"
+    """Name of the output file."""
     obb_center: Optional[Tuple[float, float, float]] = None
     """Center of the oriented bounding box."""
     obb_rotation: Optional[Tuple[float, float, float]] = None
@@ -524,10 +533,12 @@ class ExportGaussianSplat(Exporter):
             raise ValueError("All tensors must be numpy arrays of float or uint8 type and not empty")
 
         with open(filename, "wb") as ply_file:
+            nerfstudio_version = version("nerfstudio")
             # Write PLY header
             ply_file.write(b"ply\n")
             ply_file.write(b"format binary_little_endian 1.0\n")
-
+            ply_file.write(f"comment Generated by Nerstudio {nerfstudio_version}\n".encode())
+            ply_file.write(b"comment Vertical Axis: z\n")
             ply_file.write(f"element vertex {count}\n".encode())
 
             # Write properties, in order due to OrderedDict
@@ -557,7 +568,7 @@ class ExportGaussianSplat(Exporter):
 
         model: SplatfactoModel = pipeline.model
 
-        filename = self.output_dir / "splat.ply"
+        filename = self.output_dir / self.output_filename
 
         map_to_tensors = OrderedDict()
 
